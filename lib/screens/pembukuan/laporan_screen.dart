@@ -87,7 +87,7 @@ class _LaporanScreenState extends State<LaporanScreen> {
     return Scaffold(
       backgroundColor: Colors.grey[50],
       appBar: AppBar(
-        title: const Text('Laporan Pembukuan'),
+        title: const Text('Laporan Penjualan'),
         elevation: 0,
         backgroundColor: Theme.of(context).colorScheme.primary,
       ),

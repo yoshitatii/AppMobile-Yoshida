@@ -20,8 +20,9 @@ class DatabaseHelper {
     
     return await openDatabase(
       path,
-      version: 1,
+      version: 2, // Tingkatkan versi untuk migration
       onCreate: _onCreate,
+      onUpgrade: _onUpgrade,
     );
   }
 
@@ -86,50 +87,36 @@ class DatabaseHelper {
     await db.execute('CREATE INDEX idx_barang_kode ON barang(kode)');
     await db.execute('CREATE INDEX idx_transaksi_tanggal ON transaksi(tanggal)');
     await db.execute('CREATE INDEX idx_pembukuan_tanggal ON pembukuan(tanggal)');
+    await db.execute('CREATE INDEX idx_pembukuan_jenis ON pembukuan(jenis)');
+  }
+
+  // Migration untuk versi 2: Normalisasi data jenis yang sudah ada
+  Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 2) {
+      // Normalisasi semua jenis pembukuan ke lowercase
+      await db.execute('''
+        UPDATE pembukuan 
+        SET jenis = LOWER(jenis)
+        WHERE jenis IS NOT NULL
+      ''');
+      
+      // Update 'masuk' menjadi 'pemasukan' dan 'keluar' menjadi 'pengeluaran'
+      await db.execute('''
+        UPDATE pembukuan 
+        SET jenis = 'pemasukan'
+        WHERE LOWER(jenis) IN ('masuk', 'pemasukan', 'income')
+      ''');
+      
+      await db.execute('''
+        UPDATE pembukuan 
+        SET jenis = 'pengeluaran'
+        WHERE LOWER(jenis) IN ('keluar', 'pengeluaran', 'expense')
+      ''');
+    }
   }
 
   // ===========================================================
-  // FUNGSI TRANSAKSI SAKTI (SIMPAN + POTONG STOK + PEMBUKUAN)
-  // ===========================================================
-  
-  Future<void> simpanTransaksiLengkap(Map<String, dynamic> transaksiData, List<Map<String, dynamic>> items) async {
-    final db = await database;
-
-    // Menggunakan transaction agar data konsisten beb
-    await db.transaction((txn) async {
-      // 1. Simpan Header Transaksi ke tabel 'transaksi'
-      int transaksiId = await txn.insert('transaksi', transaksiData);
-
-      // 2. Loop setiap barang yang dibeli
-      for (var item in items) {
-        // Masukkan ID transaksi yang baru dibuat ke data item
-        Map<String, dynamic> itemData = Map.from(item);
-        itemData['transaksi_id'] = transaksiId;
-        
-        // Simpan ke tabel 'item_transaksi'
-        await txn.insert('item_transaksi', itemData);
-
-        // 3. LOGIKA POTONG STOK OTOMATIS
-        await txn.execute('''
-          UPDATE barang 
-          SET stok = stok - ?, updated_at = ? 
-          WHERE id = ?
-        ''', [item['jumlah'], DateTime.now().toIso8601String(), item['barang_id']]);
-      }
-
-      // 4. OTOMATIS CATAT KE PEMBUKUAN SEBAGAI UANG MASUK
-      await txn.insert('pembukuan', {
-        'jenis': 'MASUK',
-        'tanggal': transaksiData['tanggal'],
-        'nominal': transaksiData['total_harga'],
-        'kategori': 'Penjualan',
-        'keterangan': 'Penjualan No. ${transaksiData['nomor_transaksi']}'
-      });
-    });
-  }
-
-  // ===========================================================
-  // METODE GENERIC UNTUK QUERY LAINNYA
+  // METODE GENERIC UNTUK QUERY
   // ===========================================================
 
   Future<List<Map<String, dynamic>>> query(String table, {
@@ -174,8 +161,57 @@ class DatabaseHelper {
     return await db.rawQuery(sql, arguments);
   }
 
+  Future<int> rawUpdate(String sql, [List<dynamic>? arguments]) async {
+    final db = await database;
+    return await db.rawUpdate(sql, arguments);
+  }
+
   Future<void> close() async {
     final db = await database;
     await db.close();
+  }
+
+  // Helper untuk debug - melihat semua data pembukuan
+  Future<void> debugPembukuan() async {
+    final db = await database;
+    final result = await db.query('pembukuan', orderBy: 'tanggal DESC', limit: 10);
+    print('=== DEBUG PEMBUKUAN (10 terakhir) ===');
+    for (var row in result) {
+      print('ID: ${row['id']}, Jenis: ${row['jenis']}, Nominal: ${row['nominal']}, Kategori: ${row['kategori']}');
+    }
+    print('=====================================');
+  }
+
+  // Helper untuk mendapatkan ringkasan pembukuan hari ini
+  Future<Map<String, double>> getTodaySummary() async {
+    final db = await database;
+    final today = DateTime.now();
+    final startOfDay = DateTime(today.year, today.month, today.day);
+    final endOfDay = DateTime(today.year, today.month, today.day, 23, 59, 59);
+    
+    final result = await db.rawQuery('''
+      SELECT 
+        COALESCE(SUM(CASE WHEN jenis = 'pemasukan' THEN nominal ELSE 0 END), 0) as pemasukan,
+        COALESCE(SUM(CASE WHEN jenis = 'pengeluaran' THEN nominal ELSE 0 END), 0) as pengeluaran
+      FROM pembukuan 
+      WHERE tanggal >= ? AND tanggal <= ?
+    ''', [startOfDay.toIso8601String(), endOfDay.toIso8601String()]);
+    
+    if (result.isNotEmpty) {
+      final pemasukan = (result[0]['pemasukan'] as num?)?.toDouble() ?? 0.0;
+      final pengeluaran = (result[0]['pengeluaran'] as num?)?.toDouble() ?? 0.0;
+      
+      return {
+        'pemasukan': pemasukan,
+        'pengeluaran': pengeluaran,
+        'saldo': pemasukan - pengeluaran,
+      };
+    }
+    
+    return {
+      'pemasukan': 0.0,
+      'pengeluaran': 0.0,
+      'saldo': 0.0,
+    };
   }
 }

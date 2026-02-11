@@ -2,8 +2,8 @@ import 'package:flutter/foundation.dart';
 import 'package:intl/intl.dart';
 import '../models/transaksi.dart';
 import '../models/item_transaksi.dart';
-import '../models/pembukuan.dart'; // Import Model Pembukuan
-import '../providers/pembukuan_provider.dart'; // Import Provider Pembukuan
+import '../models/pembukuan.dart';
+import '../providers/pembukuan_provider.dart';
 import '../services/database_helper.dart';
 
 class TransaksiProvider with ChangeNotifier {
@@ -76,12 +76,11 @@ class TransaksiProvider with ChangeNotifier {
     }
   }
 
-  // --- BAGIAN SAKTI: SIMPAN TRANSAKSI + OTOMATIS KE PEMBUKUAN ---
-  // Kita tambahkan parameter PembukuanProvider di sini beb
+  // FIXED: Simpan dengan jenis lowercase 'pemasukan' biar konsisten
   Future<bool> saveTransaksi(
     Transaksi transaksi, 
     List<ItemTransaksi> items, 
-    PembukuanProvider pembukuanProvider // <--- Tambahan ini beb
+    PembukuanProvider pembukuanProvider
   ) async {
     try {
       // 1. Simpan data utama transaksi
@@ -101,25 +100,27 @@ class TransaksiProvider with ChangeNotifier {
           await _dbHelper.insert('item_transaksi', itemFinal.toMap());
         }
 
-        // 3. LOGIKA OTOMATIS KE PEMBUKUAN (Jawaban buat Dospem)
+        // 3. FIXED: Gunakan 'pemasukan' (lowercase) agar konsisten
         final entriPembukuan = Pembukuan(
-          jenis: 'Pemasukan',
-          tanggal: DateTime.now(), // Ambil waktu sekarang
-          nominal: transaksi.totalHarga, // Total belanja otomatis jadi nominal pembukuan
+          jenis: 'pemasukan', // ← FIXED: lowercase semua
+          tanggal: DateTime.now(),
+          nominal: transaksi.totalHarga,
           kategori: 'Penjualan',
-          keterangan: 'Penjualan Otomatis: ${transaksi.nomorTransaksi}',
+          keterangan: 'Penjualan ${transaksi.nomorTransaksi}',
         );
 
-        // Langsung panggil fungsi addPembukuan dari provider-nya
+        // Simpan ke pembukuan
         await pembukuanProvider.addPembukuan(entriPembukuan);
         
-        // 4. Refresh list riwayat dan kosongkan keranjang
+        // 4. Refresh list dan kosongkan keranjang
         await loadTransaksi();
         _keranjang.clear();
+        
+        debugPrint('✅ Transaksi & Pembukuan berhasil disimpan!');
         return true;
       }
     } catch (e) {
-      debugPrint('Error saving transaksi & pembukuan: $e');
+      debugPrint('❌ Error saving transaksi & pembukuan: $e');
     }
     return false;
   }
@@ -151,5 +152,39 @@ class TransaksiProvider with ChangeNotifier {
       debugPrint('Error deleting transaksi: $e');
     }
     return false;
+  }
+  
+  // Fungsi helper untuk mendapatkan ringkasan transaksi hari ini
+  Future<Map<String, double>> getTodayTransactionSummary() async {
+    try {
+      final today = DateTime.now();
+      final startOfDay = DateTime(today.year, today.month, today.day);
+      final endOfDay = DateTime(today.year, today.month, today.day, 23, 59, 59);
+      
+      final List<Map<String, dynamic>> result = await _dbHelper.rawQuery(
+        '''
+        SELECT 
+          COALESCE(SUM(total_harga), 0) as total_penjualan,
+          COALESCE(COUNT(*), 0) as jumlah_transaksi
+        FROM transaksi 
+        WHERE tanggal >= ? AND tanggal <= ?
+        ''',
+        [startOfDay.toIso8601String(), endOfDay.toIso8601String()],
+      );
+      
+      if (result.isNotEmpty) {
+        return {
+          'total_penjualan': (result[0]['total_penjualan'] as num?)?.toDouble() ?? 0.0,
+          'jumlah_transaksi': (result[0]['jumlah_transaksi'] as num?)?.toDouble() ?? 0.0,
+        };
+      }
+    } catch (e) {
+      debugPrint('Error getting today transaction summary: $e');
+    }
+    
+    return {
+      'total_penjualan': 0.0,
+      'jumlah_transaksi': 0.0,
+    };
   }
 }
