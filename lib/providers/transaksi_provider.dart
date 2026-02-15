@@ -64,7 +64,6 @@ class TransaksiProvider with ChangeNotifier {
       final List<Map<String, dynamic>> maps = await _dbHelper.query(
         'transaksi',
         orderBy: 'tanggal DESC',
-        limit: limit,
       );
       
       _transaksiList = maps.map((map) => Transaksi.fromMap(map)).toList().cast<Transaksi>();

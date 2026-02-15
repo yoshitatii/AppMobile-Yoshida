@@ -6,9 +6,10 @@ class Barang {
   final double hargaJual;
   final int stok;
   final String satuan;
-  final String kategori; // Aku ubah jadi non-nullable ya beb biar konsisten
-  final DateTime createdAt;
+  final String kategori;
   final DateTime updatedAt;
+  final int isiPack; 
+  final int isiBox; 
 
   Barang({
     this.id,
@@ -18,48 +19,46 @@ class Barang {
     required this.hargaJual,
     required this.stok,
     this.satuan = 'pcs',
-    this.kategori = 'Sembako', // Kasih default 'Sembako' biar gak error
-    DateTime? createdAt,
-    DateTime? updatedAt,
-  })  : createdAt = createdAt ?? DateTime.now(),
-        updatedAt = updatedAt ?? DateTime.now();
+    this.kategori = 'Umum',
+    this.isiPack = 1,
+    this.isiBox = 1,
+    DateTime? updatedAt, // Hapus 'this.' di sini karena kita pakai initializer di bawah
+  }) : updatedAt = updatedAt ?? DateTime.now(); // Ini adalah initializer list yang benar
 
   Map<String, dynamic> toMap() {
     return {
       'id': id,
       'kode': kode,
       'nama': nama,
-      'harga_beli': hargaBeli,
-      'harga_jual': hargaJual,
+      'hargaBeli': hargaBeli,
+      'hargaJual': hargaJual,
       'stok': stok,
       'satuan': satuan,
-      'kategori': kategori, // Sekarang tersimpan rapi di DB
-      'created_at': createdAt.toIso8601String(),
-      'updated_at': updatedAt.toIso8601String(),
+      'kategori': kategori,
+      'isiPack': isiPack,
+      'isiBox': isiBox,
+      'updatedAt': updatedAt.toIso8601String(),
     };
   }
 
   factory Barang.fromMap(Map<String, dynamic> map) {
     return Barang(
       id: map['id'] as int?,
-      kode: map['kode'] as String,
-      nama: map['nama'] as String,
-      hargaBeli: (map['harga_beli'] as num).toDouble(),
-      hargaJual: (map['harga_jual'] as num).toDouble(),
-      stok: map['stok'] as int,
-      satuan: map['satuan'] ?? 'pcs',
-      // Jika di DB kosong, otomatis jadi 'Sembako'
-      kategori: map['kategori'] as String? ?? 'Sembako', 
-      createdAt: map['created_at'] != null 
-          ? DateTime.parse(map['created_at'] as String) 
-          : DateTime.now(),
-      updatedAt: map['updated_at'] != null 
-          ? DateTime.parse(map['updated_at'] as String) 
+      kode: map['kode']?.toString() ?? '',
+      nama: map['nama']?.toString() ?? '',
+      hargaBeli: (map['hargaBeli'] as num?)?.toDouble() ?? 0.0,
+      hargaJual: (map['hargaJual'] as num?)?.toDouble() ?? 0.0,
+      stok: (map['stok'] as int?) ?? 0,
+      satuan: map['satuan']?.toString() ?? 'pcs',
+      kategori: map['kategori']?.toString() ?? 'Umum',
+      isiPack: map['isiPack'] as int? ?? 1,
+      isiBox: map['isiBox'] as int? ?? 1,
+      updatedAt: map['updatedAt'] != null 
+          ? DateTime.parse(map['updatedAt']) 
           : DateTime.now(),
     );
   }
 
-  // Jangan lupa copyWith juga diupdate kategorinya beb
   Barang copyWith({
     int? id,
     String? kode,
@@ -69,7 +68,8 @@ class Barang {
     int? stok,
     String? satuan,
     String? kategori,
-    DateTime? createdAt,
+    int? isiPack,
+    int? isiBox,
     DateTime? updatedAt,
   }) {
     return Barang(
@@ -81,7 +81,8 @@ class Barang {
       stok: stok ?? this.stok,
       satuan: satuan ?? this.satuan,
       kategori: kategori ?? this.kategori,
-      createdAt: createdAt ?? this.createdAt,
+      isiPack: isiPack ?? this.isiPack,
+      isiBox: isiBox ?? this.isiBox,
       updatedAt: updatedAt ?? this.updatedAt,
     );
   }

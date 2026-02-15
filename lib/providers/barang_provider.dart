@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import '../models/barang.dart';
 import '../services/database_helper.dart';
 
@@ -10,41 +11,59 @@ class BarangProvider with ChangeNotifier {
   List<Barang> get barangList => _barangList;
   bool get isLoading => _isLoading;
 
-  // Load semua barang dengan lazy loading
-  Future<void> loadBarang() async {
-    _isLoading = true;
+  // 1. Mendapatkan data dari Database
+Future<void> loadBarang({bool forceRefresh = false}) async {
+  _isLoading = true;
+  notifyListeners();
+  
+  try {
+    final List<Map<String, dynamic>> maps = await _dbHelper.query('barang');
+    
+    print("DEBUG: Berhasil ambil dari DB. Jumlah: ${maps.length}");
+    
+    _barangList = maps.map((map) => Barang.fromMap(map)).toList();
+  } catch (e) {
+    print("DEBUG ERROR LOAD: $e");
+  } finally {
+    _isLoading = false;
     notifyListeners();
+  }
+}
 
-    try {
-      final List<Map<String, dynamic>> maps = await _dbHelper.query(
-        'barang',
-        orderBy: 'nama ASC',
-      );
-
-      _barangList = maps.map((map) => Barang.fromMap(map)).toList();
-    } catch (e) {
-      debugPrint('Error loading barang: $e');
-    } finally {
-      _isLoading = false;
-      notifyListeners();
-    }
+  // 2. Fungsi Filter Pencarian (Detail: Nama & Kode)
+  List<Barang> filterBarang(String keyword) {
+    if (keyword.isEmpty) return _barangList;
+    
+    final lowerCaseKeyword = keyword.toLowerCase();
+    
+    return _barangList.where((barang) {
+      // Mencocokkan keyword dengan Nama atau Kode Barang
+      final namaMatches = barang.nama.toLowerCase().contains(lowerCaseKeyword);
+      final kodeMatches = barang.kode.toLowerCase().contains(lowerCaseKeyword);
+      
+      return namaMatches || kodeMatches;
+    }).toList();
   }
 
-  // Tambah barang
-  Future<bool> addBarang(Barang barang) async {
-    try {
-      final id = await _dbHelper.insert('barang', barang.toMap());
-      if (id > 0) {
-        await loadBarang();
-        return true;
-      }
-    } catch (e) {
-      debugPrint('Error adding barang: $e');
+  // 3. Tambah Barang
+Future<bool> addBarang(Barang barang) async {
+  try {
+    final id = await _dbHelper.insert('barang', barang.toMap());
+    print("DEBUG: Berhasil simpan ke DB. ID baru: $id");
+    
+    if (id > 0) {
+      // PENTING: Reload dari database untuk memastikan data sync
+      await loadBarang(forceRefresh: true);
+      return true;
     }
-    return false;
+  } catch (e) {
+    print("DEBUG ERROR ADD: $e");
+    debugPrint('Error Add Barang: $e');
   }
+  return false;
+}
 
-  // Update barang
+  // 4. Update Barang (Digunakan di Form Edit)
   Future<bool> updateBarang(Barang barang) async {
     try {
       final updatedBarang = barang.copyWith(updatedAt: DateTime.now());
@@ -54,17 +73,50 @@ class BarangProvider with ChangeNotifier {
         where: 'id = ?',
         whereArgs: [barang.id],
       );
+      
       if (count > 0) {
-        await loadBarang();
+        int index = _barangList.indexWhere((element) => element.id == barang.id);
+        if (index != -1) {
+          _barangList[index] = updatedBarang;
+          _barangList.sort((a, b) => a.nama.compareTo(b.nama)); // Urutkan ulang jika nama berubah
+          notifyListeners();
+        }
         return true;
       }
     } catch (e) {
-      debugPrint('Error updating barang: $e');
+      debugPrint('Error Update Barang: $e');
     }
     return false;
   }
 
-  // Hapus barang
+  // 5. Update Stok (Digunakan saat Transaksi Penjualan)
+  Future<bool> updateStok(int barangId, int jumlahTerjual) async {
+    try {
+      int index = _barangList.indexWhere((b) => b.id == barangId);
+      if (index != -1) {
+        final barang = _barangList[index];
+        final newStok = barang.stok - jumlahTerjual;
+        
+        final updated = barang.copyWith(stok: newStok, updatedAt: DateTime.now());
+        
+        await _dbHelper.update(
+          'barang', 
+          updated.toMap(), 
+          where: 'id = ?', 
+          whereArgs: [barangId]
+        );
+        
+        _barangList[index] = updated;
+        notifyListeners();
+        return true;
+      }
+    } catch (e) {
+      debugPrint('Error Update Stok: $e');
+    }
+    return false;
+  }
+
+  // 6. Hapus Barang
   Future<bool> deleteBarang(int id) async {
     try {
       final count = await _dbHelper.delete(
@@ -72,62 +124,14 @@ class BarangProvider with ChangeNotifier {
         where: 'id = ?',
         whereArgs: [id],
       );
+      
       if (count > 0) {
-        await loadBarang();
+        _barangList.removeWhere((element) => element.id == id);
+        notifyListeners();
         return true;
       }
     } catch (e) {
-      debugPrint('Error deleting barang: $e');
-    }
-    return false;
-  }
-
-  // Cari barang berdasarkan kode atau nama
-  Future<List<Barang>> searchBarang(String keyword) async {
-    try {
-      final List<Map<String, dynamic>> maps = await _dbHelper.query(
-        'barang',
-        where: 'kode LIKE ? OR nama LIKE ?',
-        whereArgs: ['%$keyword%', '%$keyword%'],
-        orderBy: 'nama ASC',
-      );
-      return maps.map((map) => Barang.fromMap(map)).toList();
-    } catch (e) {
-      debugPrint('Error searching barang: $e');
-      return [];
-    }
-  }
-
-  // Get barang by ID
-  Future<Barang?> getBarangById(int id) async {
-    try {
-      final List<Map<String, dynamic>> maps = await _dbHelper.query(
-        'barang',
-        where: 'id = ?',
-        whereArgs: [id],
-      );
-      if (maps.isNotEmpty) {
-        return Barang.fromMap(maps.first);
-      }
-    } catch (e) {
-      debugPrint('Error getting barang: $e');
-    }
-    return null;
-  }
-
-  // Update stok barang
-  Future<bool> updateStok(int barangId, int jumlah) async {
-    try {
-      final barang = await getBarangById(barangId);
-      if (barang != null) {
-        final updatedBarang = barang.copyWith(
-          stok: barang.stok - jumlah,
-          updatedAt: DateTime.now(),
-        );
-        return await updateBarang(updatedBarang);
-      }
-    } catch (e) {
-      debugPrint('Error updating stok: $e');
+      debugPrint('Error Delete Barang: $e');
     }
     return false;
   }
