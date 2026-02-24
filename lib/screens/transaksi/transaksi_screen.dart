@@ -17,20 +17,28 @@ class TransaksiScreen extends StatefulWidget {
   State<TransaksiScreen> createState() => _TransaksiScreenState();
 }
 
-class _TransaksiScreenState extends State<TransaksiScreen> {
+class _TransaksiScreenState extends State<TransaksiScreen> with RouteAware {
   final _kodeController = TextEditingController();
   final _bayarController = TextEditingController();
   final NumberFormat _formatter = NumberFormat.decimalPattern('id');
-  
+
   List<Map<String, dynamic>> _keranjangBelanja = [];
   double _totalTagihanOtomatis = 0;
 
   @override
   void initState() {
     super.initState();
+    // Load barang saat pertama kali screen dibuka
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      Provider.of<BarangProvider>(context, listen: false).loadBarang();
+      _reloadBarang();
     });
+  }
+
+  // ✅ FIX UTAMA: Selalu reload barang terbaru dari database
+  // Ini memastikan barang yang baru ditambah (termasuk via scan) langsung tersedia
+  Future<void> _reloadBarang() async {
+    await Provider.of<BarangProvider>(context, listen: false)
+        .loadBarang(forceRefresh: true);
   }
 
   @override
@@ -51,36 +59,54 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
   }
 
   String _formatCurrency(double amount) {
-    return amount.toStringAsFixed(0).replaceAllMapped(
-      RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), 
-      (Match m) => '${m[1]}.'
-    );
+    return amount
+        .toStringAsFixed(0)
+        .replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'),
+            (Match m) => '${m[1]}.');
   }
 
   void _showSnackBar(String message, Color color) {
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(message), backgroundColor: color, behavior: SnackBarBehavior.floating),
+      SnackBar(
+          content: Text(message),
+          backgroundColor: color,
+          behavior: SnackBarBehavior.floating),
     );
   }
 
   Future<void> _searchBarang(String kode) async {
     if (kode.isEmpty) return;
-    
-    final barangProvider = Provider.of<BarangProvider>(context, listen: false);
+
+    // ✅ FIX: Trim whitespace & karakter tersembunyi dari hasil scan barcode
+    // Barcode scanner kadang menambahkan \n atau spasi di akhir string
+    final kodeBersih = kode.trim();
+
+    // ✅ FIX: Pastikan data barang sudah ter-load sebelum mencari
+    final barangProvider =
+        Provider.of<BarangProvider>(context, listen: false);
+
+    if (barangProvider.barangList.isEmpty) {
+      await barangProvider.loadBarang(forceRefresh: true);
+    }
+
+    // ✅ FIX: Gunakan kodeBersih dan bandingkan setelah trim() di kedua sisi
     final barang = barangProvider.barangList.firstWhere(
-      (b) => b.kode.toLowerCase() == kode.toLowerCase(),
-      orElse: () => Barang(kode: '', nama: '', hargaBeli: 0, hargaJual: 0, stok: 0),
+      (b) => b.kode.trim().toLowerCase() == kodeBersih.toLowerCase(),
+      orElse: () =>
+          Barang(kode: '', nama: '', hargaBeli: 0, hargaJual: 0, stok: 0),
     );
 
     if (barang.kode.isNotEmpty) {
       if (barang.stok <= 0) {
         _showSnackBar('Stok ${barang.nama} Habis!', Colors.red);
+        _kodeController.clear();
         return;
       }
 
       setState(() {
-        int index = _keranjangBelanja.indexWhere((item) => item['barangId'] == barang.id);
-        
+        int index = _keranjangBelanja
+            .indexWhere((item) => item['barangId'] == barang.id);
+
         if (index == -1) {
           _keranjangBelanja.add({
             'barangId': barang.id,
@@ -94,19 +120,31 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
             'subtotal': barang.hargaJual,
             'stokTersedia': barang.stok,
           });
+        } else {
+          // Jika sudah ada di keranjang, tambah jumlahnya
+          final existing = _keranjangBelanja[index];
+          final jumlahBaru = existing['jumlah'] + 1;
+          _keranjangBelanja[index] = {
+            ...existing,
+            'jumlah': jumlahBaru,
+            'subtotal':
+                (existing['hargaSatuanPcs'] * existing['pengali']) * jumlahBaru,
+          };
         }
         _kodeController.clear();
         _hitungTotalSemua();
       });
     } else {
-      _showSnackBar('Barang tidak ditemukan', Colors.orange);
+      // ✅ FIX: Tampilkan kode yang dicari agar mudah debug
+      _showSnackBar(
+          'Barang dengan kode "$kodeBersih" tidak ditemukan', Colors.orange);
+      _kodeController.clear();
     }
   }
 
-  // FUNGSI PROSES TRANSAKSI
   Future<void> _proses() async {
     if (_keranjangBelanja.isEmpty) return;
-    
+
     final bayarText = _bayarController.text.replaceAll('.', '');
     final bayar = double.tryParse(bayarText) ?? 0;
 
@@ -117,16 +155,19 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
 
     final kembalian = bayar - _totalTagihanOtomatis;
 
-    // --- LOGIKA SIMPAN KE DATABASE & UPDATE STOK ---
-    final transaksiProvider = Provider.of<TransaksiProvider>(context, listen: false);
-    final barangProvider = Provider.of<BarangProvider>(context, listen: false);
-    final pembukuanProvider = Provider.of<PembukuanProvider>(context, listen: false);
+    final transaksiProvider =
+        Provider.of<TransaksiProvider>(context, listen: false);
+    final barangProvider =
+        Provider.of<BarangProvider>(context, listen: false);
+    final pembukuanProvider =
+        Provider.of<PembukuanProvider>(context, listen: false);
 
     List<ItemTransaksi> keranjangFix = _keranjangBelanja.map((item) {
       return ItemTransaksi(
-        transaksiId: 0, 
+        transaksiId: 0,
         barangId: item['barangId'],
-        namaBarang: "${item['nama']} (${item['satuanTerpilih'].toString().toUpperCase()})",
+        namaBarang:
+            "${item['nama']} (${item['satuanTerpilih'].toString().toUpperCase()})",
         jumlah: item['jumlah'],
         harga: item['hargaSatuanPcs'] * item['pengali'],
         subtotal: item['subtotal'],
@@ -142,11 +183,10 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
         kembalian: kembalian,
       ),
       keranjangFix,
-      pembukuanProvider
+      pembukuanProvider,
     );
 
     if (success) {
-      // Update stok barang di provider/database
       for (var item in _keranjangBelanja) {
         int totalPcsKeluar = item['jumlah'] * (item['pengali'] as int);
         await barangProvider.updateStok(item['barangId'], totalPcsKeluar);
@@ -166,11 +206,15 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
           children: [
             const Icon(Icons.check_circle, color: Colors.green, size: 60),
             const SizedBox(height: 16),
-            const Text('Transaksi Berhasil!', style: TextStyle(fontWeight: FontWeight.bold)),
+            const Text('Transaksi Berhasil!',
+                style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
             Text(
-              "Kembalian: Rp ${_formatCurrency(kembalian)}", 
-              style: const TextStyle(fontSize: 18, color: Colors.green, fontWeight: FontWeight.bold)
+              "Kembalian: Rp ${_formatCurrency(kembalian)}",
+              style: const TextStyle(
+                  fontSize: 18,
+                  color: Colors.green,
+                  fontWeight: FontWeight.bold),
             ),
           ],
         ),
@@ -183,8 +227,8 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
                 _totalTagihanOtomatis = 0;
                 _bayarController.clear();
               });
-            }, 
-            child: const Text('OK')
+            },
+            child: const Text('OK'),
           )
         ],
       ),
@@ -200,7 +244,8 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
         setState(() {
           _keranjangBelanja[index]['satuanTerpilih'] = label.toLowerCase();
           _keranjangBelanja[index]['pengali'] = multiplier;
-          _keranjangBelanja[index]['subtotal'] = (item['hargaSatuanPcs'] * multiplier) * item['jumlah'];
+          _keranjangBelanja[index]['subtotal'] =
+              (item['hargaSatuanPcs'] * multiplier) * item['jumlah'];
           _hitungTotalSemua();
         });
       },
@@ -210,7 +255,11 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
           color: isSelected ? color : Colors.grey[200],
           borderRadius: BorderRadius.circular(8),
         ),
-        child: Text(label, style: TextStyle(color: isSelected ? Colors.white : Colors.black, fontSize: 10, fontWeight: FontWeight.bold)),
+        child: Text(label,
+            style: TextStyle(
+                color: isSelected ? Colors.white : Colors.black,
+                fontSize: 10,
+                fontWeight: FontWeight.bold)),
       ),
     );
   }
@@ -218,26 +267,54 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Kasir Penjualan'), backgroundColor: const Color(0xFF42709A)),
+      appBar: AppBar(
+        title: const Text('Kasir Penjualan'),
+        backgroundColor: const Color(0xFF42709A),
+        foregroundColor: Colors.white,
+        // ✅ FIX: Tombol refresh manual jika barang masih tidak muncul
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh Data Barang',
+            onPressed: () async {
+              await _reloadBarang();
+              _showSnackBar('Data barang diperbarui', Colors.green);
+            },
+          ),
+        ],
+      ),
       body: Column(
         children: [
           Padding(
             padding: const EdgeInsets.all(16.0),
             child: Column(
               children: [
+                // ✅ FIX: Setelah scan, langsung reload barang dulu baru cari
                 ElevatedButton.icon(
                   onPressed: () async {
-                    final res = await Navigator.push(context, MaterialPageRoute(builder: (context) => const BarcodeScannerScreen()));
+                    // Reload dulu sebelum scan untuk memastikan data fresh
+                    await _reloadBarang();
+
+                    if (!mounted) return;
+                    final res = await Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (context) => const BarcodeScannerScreen()),
+                    );
                     if (res != null) _searchBarang(res);
                   },
                   icon: const Icon(Icons.qr_code_scanner),
                   label: const Text("SCAN BARCODE"),
-                  style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 50)),
+                  style: ElevatedButton.styleFrom(
+                      minimumSize: const Size(double.infinity, 50)),
                 ),
                 const SizedBox(height: 10),
                 TextField(
                   controller: _kodeController,
-                  decoration: const InputDecoration(hintText: "Cari Kode Manual...", prefixIcon: Icon(Icons.search), border: OutlineInputBorder()),
+                  decoration: const InputDecoration(
+                      hintText: "Cari Kode Manual...",
+                      prefixIcon: Icon(Icons.search),
+                      border: OutlineInputBorder()),
                   onSubmitted: _searchBarang,
                 ),
               ],
@@ -245,125 +322,211 @@ class _TransaksiScreenState extends State<TransaksiScreen> {
           ),
 
           Expanded(
-            child: ListView.builder(
-              itemCount: _keranjangBelanja.length,
-              itemBuilder: (context, index) {
-                final item = _keranjangBelanja[index];
-                String labelSatuan = item['satuanTerpilih'].toString().toUpperCase();
-                double hargaSatuanPilihan = item['hargaSatuanPcs'] * item['pengali'];
-
-                return Card(
-                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 5),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12.0),
+            child: _keranjangBelanja.isEmpty
+                ? Center(
                     child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        Row(
-                          children: [
-                            const Icon(Icons.shopping_bag, color: Colors.blue),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                        Icon(Icons.shopping_cart_outlined,
+                            size: 64, color: Colors.grey[300]),
+                        const SizedBox(height: 12),
+                        Text('Keranjang kosong',
+                            style: TextStyle(color: Colors.grey[500])),
+                        const SizedBox(height: 6),
+                        Text('Scan atau ketik kode barang',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[400])),
+                      ],
+                    ),
+                  )
+                : ListView.builder(
+                    itemCount: _keranjangBelanja.length,
+                    itemBuilder: (context, index) {
+                      final item = _keranjangBelanja[index];
+                      String labelSatuan =
+                          item['satuanTerpilih'].toString().toUpperCase();
+                      double hargaSatuanPilihan =
+                          item['hargaSatuanPcs'] * item['pengali'];
+
+                      return Card(
+                        margin: const EdgeInsets.symmetric(
+                            horizontal: 16, vertical: 5),
+                        child: Padding(
+                          padding: const EdgeInsets.all(12.0),
+                          child: Column(
+                            children: [
+                              Row(
                                 children: [
-                                  Text(item['nama'], style: const TextStyle(fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 4),
-                                  Row(
-                                    children: [
-                                      Text(
-                                        "${item['jumlah']} $labelSatuan",
-                                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.blueGrey),
-                                      ),
-                                      if (item['satuanTerpilih'] != 'pcs')
-                                        Text(" (Isi ${item['pengali']})", style: const TextStyle(fontSize: 11, color: Colors.grey)),
-                                      Text(
-                                        " x ${_formatCurrency(hargaSatuanPilihan)}", 
-                                        style: const TextStyle(fontSize: 12)
-                                      ),
-                                    ],
+                                  const Icon(Icons.shopping_bag,
+                                      color: Colors.blue),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(item['nama'],
+                                            style: const TextStyle(
+                                                fontWeight: FontWeight.bold)),
+                                        const SizedBox(height: 4),
+                                        Row(
+                                          children: [
+                                            Text(
+                                              "${item['jumlah']} $labelSatuan",
+                                              style: const TextStyle(
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.bold,
+                                                  color: Colors.blueGrey),
+                                            ),
+                                            if (item['satuanTerpilih'] != 'pcs')
+                                              Text(
+                                                  " (Isi ${item['pengali']})",
+                                                  style: const TextStyle(
+                                                      fontSize: 11,
+                                                      color: Colors.grey)),
+                                            Text(
+                                                " x ${_formatCurrency(hargaSatuanPilihan)}",
+                                                style: const TextStyle(
+                                                    fontSize: 12)),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Text(
+                                    "Rp ${_formatCurrency(item['subtotal'])}",
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.blue),
+                                  ),
+                                  IconButton(
+                                    onPressed: () => setState(() {
+                                      _keranjangBelanja.removeAt(index);
+                                      _hitungTotalSemua();
+                                    }),
+                                    icon: const Icon(Icons.delete,
+                                        color: Colors.red),
                                   ),
                                 ],
                               ),
-                            ),
-                            Text(
-                              "Rp ${_formatCurrency(item['subtotal'])}", 
-                              style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.blue)
-                            ),
-                            IconButton(onPressed: () => setState(() { _keranjangBelanja.removeAt(index); _hitungTotalSemua(); }), icon: const Icon(Icons.delete, color: Colors.red)),
-                          ],
+                              const Divider(),
+                              Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Wrap(
+                                    spacing: 5,
+                                    children: [
+                                      _buildUnitButton(
+                                          index, "PCS", 1, Colors.green),
+                                      if (item['isiPack'] > 1)
+                                        _buildUnitButton(index, "PACK",
+                                            item['isiPack'], Colors.orange),
+                                      if (item['isiBox'] > 1)
+                                        _buildUnitButton(index, "BOX",
+                                            item['isiBox'], Colors.blue),
+                                    ],
+                                  ),
+                                  Row(
+                                    children: [
+                                      IconButton(
+                                        onPressed: () => setState(() {
+                                          if (item['jumlah'] > 1)
+                                            item['jumlah']--;
+                                          item['subtotal'] =
+                                              (item['hargaSatuanPcs'] *
+                                                      item['pengali']) *
+                                                  item['jumlah'];
+                                          _hitungTotalSemua();
+                                        }),
+                                        icon: const Icon(
+                                            Icons.remove_circle_outline),
+                                      ),
+                                      Text("${item['jumlah']}"),
+                                      IconButton(
+                                        onPressed: () => setState(() {
+                                          item['jumlah']++;
+                                          item['subtotal'] =
+                                              (item['hargaSatuanPcs'] *
+                                                      item['pengali']) *
+                                                  item['jumlah'];
+                                          _hitungTotalSemua();
+                                        }),
+                                        icon: const Icon(
+                                            Icons.add_circle_outline),
+                                      ),
+                                    ],
+                                  )
+                                ],
+                              )
+                            ],
+                          ),
                         ),
-                        const Divider(),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Wrap(
-                              spacing: 5,
-                              children: [
-                                _buildUnitButton(index, "PCS", 1, Colors.green),
-                                if (item['isiPack'] > 1) _buildUnitButton(index, "PACK", item['isiPack'], Colors.orange),
-                                if (item['isiBox'] > 1) _buildUnitButton(index, "BOX", item['isiBox'], Colors.blue),
-                              ],
-                            ),
-                            Row(
-                              children: [
-                                IconButton(onPressed: () => setState(() { if(item['jumlah'] > 1) item['jumlah']--; item['subtotal'] = (item['hargaSatuanPcs'] * item['pengali']) * item['jumlah']; _hitungTotalSemua(); }), icon: const Icon(Icons.remove_circle_outline)),
-                                Text("${item['jumlah']}"),
-                                IconButton(onPressed: () => setState(() { item['jumlah']++; item['subtotal'] = (item['hargaSatuanPcs'] * item['pengali']) * item['jumlah']; _hitungTotalSemua(); }), icon: const Icon(Icons.add_circle_outline)),
-                              ],
-                            )
-                          ],
-                        )
-                      ],
-                    ),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
 
           Container(
             padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(color: Colors.white, boxShadow: [BoxShadow(blurRadius: 10, color: Colors.black12)]),
+            decoration: const BoxDecoration(
+                color: Colors.white,
+                boxShadow: [
+                  BoxShadow(blurRadius: 10, color: Colors.black12)
+                ]),
             child: Column(
               children: [
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween, 
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    const Text("Total Tagihan", style: TextStyle(fontWeight: FontWeight.bold)), 
-                    Text("Rp ${_formatCurrency(_totalTagihanOtomatis)}", style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.blue))
-                  ]
+                    const Text("Total Tagihan",
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    Text(
+                      "Rp ${_formatCurrency(_totalTagihanOtomatis)}",
+                      style: const TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue),
+                    )
+                  ],
                 ),
                 const SizedBox(height: 10),
                 TextField(
-                  controller: _bayarController, 
+                  controller: _bayarController,
                   keyboardType: TextInputType.number,
                   inputFormatters: [
                     FilteringTextInputFormatter.digitsOnly,
                     TextInputFormatter.withFunction((oldValue, newValue) {
                       if (newValue.text.isEmpty) return newValue;
                       final int value = int.parse(newValue.text);
-                      final String newText = _formatter.format(value).replaceAll(',', '.');
+                      final String newText =
+                          _formatter.format(value).replaceAll(',', '.');
                       return newValue.copyWith(
                         text: newText,
-                        selection: TextSelection.collapsed(offset: newText.length),
+                        selection: TextSelection.collapsed(
+                            offset: newText.length),
                       );
                     }),
                   ],
                   decoration: const InputDecoration(
-                    labelText: "Uang Bayar", 
+                    labelText: "Uang Bayar",
                     prefixText: "Rp ",
                     border: OutlineInputBorder(),
-                  )
+                  ),
                 ),
                 const SizedBox(height: 10),
                 SizedBox(
-                  width: double.infinity, 
-                  height: 50, 
+                  width: double.infinity,
+                  height: 50,
                   child: ElevatedButton(
-                    onPressed: _keranjangBelanja.isNotEmpty ? _proses : null, 
-                    style: ElevatedButton.styleFrom(backgroundColor: Colors.green), 
-                    child: const Text("PROSES TRANSAKSI", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold))
-                  )
+                    onPressed: _keranjangBelanja.isNotEmpty ? _proses : null,
+                    style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.green),
+                    child: const Text("PROSES TRANSAKSI",
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold)),
+                  ),
                 ),
               ],
             ),
